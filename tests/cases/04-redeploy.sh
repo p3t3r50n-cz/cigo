@@ -12,8 +12,8 @@ cigo_create "$name" "$FIXTURES/basic" >/dev/null
 assert_eq "hello" "$(ct_run "$name" "sed -n 's/^greeting = //p' /etc/cigo-it/app.conf")" \
     "initial render"
 
-output=$(cigo_expect_ok "$CIGO" create --name "$name" --template "$FIXTURES/basic" \
-    --image "$CIGO_IT_IMAGE" --yes --var GREETING=bye --config limits.memory=256MiB)
+output=$(cigo_expect_ok "$CIGO" redeploy --name "$name" --template "$FIXTURES/basic" \
+    --yes --var GREETING=bye --config limits.memory=256MiB)
 assert_contains "$output" "Re-deploy completed" "re-deploy reported"
 assert_contains "$output" "Updated container config: limits.memory=256MiB" "config updated"
 

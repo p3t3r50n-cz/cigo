@@ -13,6 +13,18 @@ missing for this use case: container settings before first boot, ordered
 post-boot actions, repeatable re-deploys, simple data transfer, and safe
 transfer of render-only secrets.
 
+cigo has four verbs, one per intent:
+
+| Verb | Target | Applies |
+|---|---|---|
+| `create` | a container that must not exist | config, devices, cloud-init, actions |
+| `redeploy` | an existing cigo-managed container | config, devices, actions |
+| `configure` | any existing container | config and devices only |
+| `adopt` | an existing container cigo did not create | config and devices, then marks it managed |
+
+The verb never guesses: `create` refuses to touch an existing container and
+`redeploy` refuses to take over a foreign one.
+
 ## Requirements
 
 On the host:
@@ -20,7 +32,8 @@ On the host:
 - Bash
 - LXD client (`lxc`)
 - `jq` (used to read LXD's JSON from `lxc query`)
-- Python 3 with Jinja2 (`python3-jinja2`) for `cigo: render`
+- Python 3 with Jinja2 (`python3-jinja2`) for `cigo: render`; `configure` and
+  `adopt` never render, so they do not need it
 - `cloud-init` is optional. When it is installed, `--check` and `--dry-run`
   also validate the rendered cloud-config schema; when it is missing, that
   single check is skipped with a warning
@@ -45,6 +58,20 @@ For automation:
 ./cigo.sh create --name web-01 --template templates/lamp --yes
 ```
 
+Later, to push template changes into the running container:
+
+```bash
+./cigo.sh redeploy --name web-01 --template templates/lamp          # config + actions
+./cigo.sh configure --name web-01 --template templates/lamp         # config only
+./cigo.sh configure --name web-01 --config limits.memory=4GiB       # one-off key
+```
+
+To take over a container that already exists:
+
+```bash
+./cigo.sh adopt --name old-web --template templates/lamp
+```
+
 `--yes` skips confirmations. Proxy devices inherited from a source container
 are always skipped in this mode because they can conflict with the source.
 
@@ -55,17 +82,54 @@ are always skipped in this mode because they can conflict with the source.
 | **Bootstrap** | The remaining cloud-config (`packages`, `write_files`, `bootcmd`, etc.) | First boot only |
 | **Pipeline** | `cigo: ...` actions | On every cigo invocation |
 
-Cloud-init does not run again during re-deploy. Put repeatable package
+Cloud-init does not run again after creation. Put repeatable package
 installation, file transfer, rendering, and commands in the cigo pipeline.
 Use cloud-config for first-boot setup that genuinely belongs to bootstrap.
 
-When the named container already exists, cigo does not recreate it or reapply
-its image, profiles, source inheritance, or cloud-init user-data. It applies
-the template's `cigo: config` values, reconciles explicitly declared devices,
-and then runs its pipeline actions. LXD decides whether a changed key or
-device property can be updated while the container is running; if it rejects
-a change, cigo stops with an explicit error. Earlier changes in the same run
-may already have applied.
+An existing container is only ever touched by the verb that names it:
+
+- `redeploy` applies `cigo: config` values, reconciles declared devices, and
+  runs pipeline actions.
+- `configure` applies `cigo: config` values and declared devices only. It
+  never runs actions and never touches cloud-init, which makes it fast and
+  safe on a running container.
+- `adopt` does what `configure` does and then records that cigo manages the
+  container.
+
+LXD decides whether a changed key or device property can be updated while the
+container is running; if it rejects a change, cigo stops with an explicit
+error. Earlier changes in the same run may already have applied.
+
+## Container metadata and managed keys
+
+cigo stores a little state on the container itself, in LXD's reserved `user.*`
+namespace. No state file is created on the host.
+
+```console
+$ lxc config show web-01 | grep user.cigo
+  user.cigo.created-at: 2026-10-28T13:29:48Z
+  user.cigo.managed-keys: limits.cpu,limits.memory
+  user.cigo.template: lamp
+  user.cigo.version: 0.2.0
+```
+
+`user.cigo.managed-keys` lists the config keys cigo has written. It is what
+makes declarative cleanup safe:
+
+- `configure --template` and `redeploy` remove a key only when cigo wrote it
+  earlier and the template no longer declares it. Keys you set by hand are
+  never pruned.
+- `--config` on the command line is a one-off override. It is applied but
+  never recorded as managed, so a later run cannot silently delete it.
+- `configure` without `--template` is imperative: it applies exactly the
+  given `--config`, `--unset`, and `--remove-device` values, prunes nothing,
+  and leaves the metadata untouched.
+- Whole devices are never removed implicitly. A device the template no longer
+  declares is reported by `--check` and removed only with
+  `--remove-device NAME`.
+
+`--from` never inherits `user.cigo.*`, so a new container cannot inherit
+another container's identity.
 
 ## Template format
 
@@ -178,12 +242,13 @@ values containing spaces are not supported. Add LXD-supported options such as
 `readonly=true` to disk devices as needed.
 
 On create, disk devices are added before the first start; proxy devices are
-added after cloud-init completes. On every re-deploy, cigo ensures each
-declared device exists and updates its options to match the template. Options
-on that same instance device which are omitted from the declaration are
-removed. Other devices are left alone; omitting a device from a template does
-not remove it. Use unique names: cigo refuses to manage devices defined by an
-LXD profile or also inherited through `cigo: from`.
+added after cloud-init completes. On every `redeploy` and `configure`, cigo
+ensures each declared device exists and updates its options to match the
+template. Options on that same instance device which are omitted from the
+declaration are removed. Whole devices are left alone: dropping a device from
+a template never deletes it, `--check` reports it, and `--remove-device NAME`
+deletes it on request. Use unique names: cigo refuses to manage devices
+defined by an LXD profile or also inherited through `cigo: from`.
 
 Proxy listen conflicts are errors; cigo will not silently change a declared
 port or remove another device to free it. LXD may reject a device change that
@@ -195,35 +260,63 @@ a device is added or updated.
 ## Command-line options
 
 ```text
+cigo.sh create    --name NAME --template FILE.yaml [options]
+cigo.sh redeploy  --name NAME --template FILE.yaml [options]
+cigo.sh configure --name NAME [--template FILE.yaml] [options]
+cigo.sh adopt     --name NAME --template FILE.yaml [options]
+```
+
+```text
 --name NAME
---template FILE|DIR
---image IMAGE
---from CONTAINER
---profile PROFILE       repeatable; replaces all template profiles
---config KEY=VALUE      repeatable; merges by key and overrides the template
---var NAME=VALUE        repeatable; overrides a variable already in the template
---secret-file NAME=FILE repeatable; secret is available only to render
---secret-env NAME[=VAR] repeatable; secret is read from the environment
---timeout SECONDS
---log MODE
+--template FILE|DIR      required except for configure
+--image IMAGE            create only
+--from CONTAINER         create only
+--profile PROFILE        create only; repeatable, replaces all template profiles
+--config KEY=VALUE       repeatable; merges by key and overrides the template
+--unset KEY              configure, redeploy; repeatable
+--remove-device NAME     configure, redeploy; repeatable
+--var NAME=VALUE         repeatable; overrides a variable already in the template
+--secret-file NAME=FILE  repeatable; secret is available only to render
+--secret-env NAME[=VAR]  repeatable; secret is read from the environment
+--timeout SECONDS        create only
+--log MODE               create only
 --dry-run
 --check
---dump-user-data FILE
+--dump-user-data FILE    create only
 -y, --yes
 -V, --version
 ```
 
 Command-line options override matching template directives. `--config` merges
-by key; `--profile` replaces the complete profile list.
+by key; `--profile` replaces the complete profile list. Options that cannot
+mean anything for a verb are rejected rather than ignored.
 
-`--dry-run` prints the plan and performs read-only LXD queries, without
-changing LXD state. If the host has `cloud-init`, it also validates the
-rendered user-data schema.
+`--dry-run` prints the plan without changing LXD state. For `create` it also
+exercises every render and, when the host has `cloud-init`, validates the
+rendered user-data schema. For an existing container it prints the same diff
+as `--check` and exits 0.
 
-`--check` validates everything it can without changing LXD state: action
-inputs, device declarations, secret availability, and every render (so an
-undefined variable or a broken template fails here). It is meant to run in CI
-and does not require LXD access for the render step.
+`--check` changes nothing. For `create` it validates everything it can: action
+inputs, device declarations, secret availability, and every render, so an
+undefined variable or a broken template fails here. For an existing container
+it is a drift report:
+
+```console
+$ ./cigo.sh configure --name web-01 --template templates/lamp --check
+=== Config ===
+  ~ limits.memory: 256MiB -> 192MiB
+=== Devices ===
+  = device web-http listen=tcp:0.0.0.0:8080
+=== Not managed by cigo ===
+  ? boot.autostart = true  (set outside cigo)
+Drift detected: web-01 differs from the declared state.
+$ echo $?
+1
+```
+
+Exit codes: `0` when nothing would change, `1` when the container differs or
+a validation fails, `2` for a usage error. Keys set outside cigo are listed
+for information and never count as drift.
 
 The cloud-config schema check needs the `cloud-init` command on the host. When
 it is missing, only that check is skipped and reported as a warning; `--check`
@@ -374,9 +467,8 @@ not the source OS or its cloud-init configuration.
   or quit. A failed handoff attempts to restore the device on the source.
 - `--yes` skips inherited proxy devices and prints manual commands.
 
-When a container already exists, `from` is ignored. Re-deploying its pipeline
-or explicitly declared devices does not require the source container to
-remain available.
+Explicitly declared devices can be reapplied without the source container
+being available; only a new `create --from` needs it.
 
 ## Copy and sync semantics
 
@@ -548,9 +640,12 @@ when a case fails, so existing containers are never touched. The suite covers:
 | `07-from` | config and devices are inherited, and the template override wins |
 | `08-errors` | invalid input fails with a clear message and creates nothing |
 | `09-templates` | every bundled template parses and renders against real LXD |
+| `10-verbs` | `create`/`redeploy`/`configure` refuse the wrong target; `adopt` stamps metadata; create-only options are rejected |
+| `11-configure` | `configure` skips actions, prunes only keys cigo wrote, keeps manual keys, and removes devices only on request |
+| `12-drift` | `--check` exits 1 on drift and 0 when clean; `--dry-run` prints the same plan and changes nothing |
 
 Cases marked in the table only exercise the fast path (fixtures that install no
-packages), so the whole suite finishes in about two minutes. Deploying the real
+packages), so the whole suite finishes in about four minutes. Deploying the real
 service templates — which install Apache, BIND or Postfix — is a separate,
 slower tier that is not part of the default run yet.
 
@@ -561,6 +656,8 @@ slower tier that is not part of the default run yet.
   incomplete container; inspect it or delete it explicitly with LXD.
 - `cigo: run` idempotency is the template author's responsibility.
 - cigo does not create snapshots automatically.
+- cigo manages config keys it wrote itself; it never removes settings that were
+  made by hand.
 - cigo is designed for small LXD environments, not as a replacement for
   Ansible, Terraform, Incus, or a full configuration-management system.
 
@@ -568,3 +665,7 @@ slower tier that is not part of the default run yet.
 
 cigo is distributed under the GNU General Public License, version 3. See
 [LICENSE](LICENSE).
+
+## Author
+
+Petr Palacký — <http://palacky.net>

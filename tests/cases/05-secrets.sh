@@ -23,8 +23,8 @@ assert_file_mode "$name" /etc/cigo-it/secret.conf 600
 
 # A rotated file must be picked up by the next run.
 printf 'rotated-secret-value\n' > "$work/secret"
-cigo_expect_ok "$CIGO" create --name "$name" --template "$FIXTURES/secret" \
-    --image "$CIGO_IT_IMAGE" --yes --secret-file "IT_SECRET=$work/secret" >/dev/null
+cigo_expect_ok "$CIGO" redeploy --name "$name" --template "$FIXTURES/secret" \
+    --yes --secret-file "IT_SECRET=$work/secret" >/dev/null
 assert_eq "rotated-secret-value" \
     "$(ct_run "$name" "sed -n 's/^secret = //p' /etc/cigo-it/secret.conf")" \
     "rotated secret applied on re-deploy"

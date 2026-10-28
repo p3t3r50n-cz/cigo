@@ -17,17 +17,20 @@ cigo: var MAIL_HOSTNAME=mail.example.test
 package_update: true
 package_upgrade: true
 
-debconf_selections:
-  postfix: |
-    postfix postfix/mailname string %MAIL_HOSTNAME%
-    postfix postfix/main_mailer_type select Internet Site
+# cloud-init dropped the debconf module, so preseed before the packages are
+# installed. bootcmd runs in the init stage, ahead of package installation.
+bootcmd:
+  - |
+    printf '%s\n' \
+      'postfix postfix/mailname string %MAIL_HOSTNAME%' \
+      'postfix postfix/main_mailer_type select Internet Site' | debconf-set-selections
 
 users:
   - default
   - name: vmail
     system: true
     uid: 5000
-    home: /var/vmail
+    homedir: /var/vmail
     shell: /usr/sbin/nologin
     lock_passwd: true
 

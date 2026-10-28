@@ -28,8 +28,8 @@ fi
 pass "gateway built-in resolved to $gateway"
 
 # Reconcile to a different host directory.
-cigo_expect_ok "$CIGO" create --name "$name" --template "$FIXTURES/device" \
-    --image "$CIGO_IT_IMAGE" --yes --var "DATA_DIR=$work/two" >/dev/null
+cigo_expect_ok "$CIGO" redeploy --name "$name" --template "$FIXTURES/device" \
+    --yes --var "DATA_DIR=$work/two" >/dev/null
 device=$(lxc config device show "$name")
 assert_contains "$device" "source: $work/two" "device source reconciled"
 assert_eq "from-two" "$(ct_run "$name" "cat /mnt/it-data/marker.txt")" \

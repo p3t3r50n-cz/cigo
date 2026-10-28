@@ -5,9 +5,17 @@
 #
 # CI + GO = cigo. Run cigo and get going.
 #
+# Author: Petr Palacký <http://palacky.net>
+#
 # Two separate layers:
 #   bootstrap — cloud-config in the template, applied only on first boot
 #   pipeline  — "cigo: ..." actions, run on every invocation
+#
+# Verbs keep the layers apart:
+#   create     new container, bootstrap + config + devices + actions
+#   redeploy   existing container, config + devices + actions
+#   configure  existing container, config + devices only
+#   adopt      take over an existing container, config + devices, no bootstrap
 
 set -euo pipefail
 trap on_exit EXIT
@@ -47,9 +55,20 @@ setup_colors
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TEMPLATE_DIR=""
-CIGO_VERSION="0.1.0"
+CIGO_VERSION="0.2.0"
 DEFAULT_IMAGE="ubuntu:24.04"
 DEFAULT_TIMEOUT=900
+
+# Metadata cigo keeps on the container itself, so no state file is needed.
+# LXD reserves the user.* namespace for exactly this purpose.
+META_PREFIX="user.cigo."
+META_VERSION="user.cigo.version"
+META_TEMPLATE="user.cigo.template"
+META_CREATED="user.cigo.created-at"
+META_ADOPTED="user.cigo.adopted-at"
+META_MANAGED="user.cigo.managed-keys"
+
+VERB=""
 
 NAME=""
 TEMPLATE=""
@@ -59,6 +78,8 @@ LOG_MODE="journal"
 CLOUD_TIMEOUT=$DEFAULT_TIMEOUT
 PROFILES=()
 CT_CONFIG=()
+TEMPLATE_CONFIG=()
+TEMPLATE_LABEL=""
 ACTIONS=()
 DEVICE_NAMES=()
 CLI_VARS=()
@@ -66,6 +87,8 @@ CLI_IMAGE=""
 CLI_FROM=""
 CLI_PROFILES=()
 CLI_CONFIG=()
+CLI_UNSET=()
+CLI_REMOVE_DEVICES=()
 CLI_SECRET_FILES=()
 CLI_SECRET_ENV=()
 CLI_TIMEOUT=""
@@ -75,6 +98,11 @@ CHECK_ONLY=false
 DUMP_USER_DATA=""
 EXISTING_CT=false
 REMOTE_STAGE_DIR=""
+# Reporting mode for an existing container: --check and --dry-run compute the
+# plan and never mutate LXD state.
+PLAN_MODE=false
+DRIFT=false
+MANAGED_KEYS=()
 declare -A VARS=()
 declare -A VAR_ORIGIN=()
 declare -A INHERIT_CONFIG=()
@@ -169,28 +197,51 @@ confirm() {
 usage() {
     cat <<'USAGE'
 Usage:
-  cigo.sh create --name NAME --template FILE.yaml [options]
+  cigo.sh create    --name NAME --template FILE.yaml [options]
+  cigo.sh redeploy  --name NAME --template FILE.yaml [options]
+  cigo.sh configure --name NAME [--template FILE.yaml] [options]
+  cigo.sh adopt     --name NAME --template FILE.yaml [options]
+  cigo.sh -V | --version
+  cigo.sh -h | --help
+
+Verbs:
+  create      Create a new container: config, devices, cloud-init, actions.
+  redeploy    Reapply a template to an existing container: config, devices,
+              actions. cloud-init is never reapplied.
+  configure   Change LXD config and declared devices of an existing container
+              only. No actions, no cloud-init.
+  adopt       Take over an existing container that cigo did not create:
+              config and devices are applied, cloud-init is not.
 
 Options:
   --name NAME               Container name (required)
-  --template FILE|DIR       Template file, or a directory with template.yaml (required)
-  --image IMAGE             Image for lxc init (default: ubuntu:24.04)
-  --from CONTAINER          Inherit config and devices from a container
+  --template FILE|DIR       Template file, or a directory with template.yaml
+                            (required except for configure)
+  --image IMAGE             Image for lxc init (default: ubuntu:24.04, create only)
+  --from CONTAINER          Inherit config and devices from a container (create only)
   --profile PROFILE         LXD profile; repeatable, replaces template profiles
   --config KEY=VALUE        Container config; repeatable
+  --unset KEY               Remove a config key (configure, redeploy)
+  --remove-device NAME      Remove a whole device (configure, redeploy)
   --var NAME=VALUE          Override a template variable; repeatable
   --secret-file NAME=FILE   Secret for cigo: render; relative resolves against $PWD
   --secret-env NAME[=VAR]   Read a render secret from the environment; repeatable
-  --timeout SECONDS         Cloud-init timeout (default: 900)
+  --timeout SECONDS         Cloud-init timeout (default: 900, create only)
   --log MODE                journal|cloud-init|output|both|none (default: journal)
   --dry-run                 Show the plan without changing LXD state
-  --check                   Validate everything possible; changes no LXD state
-  --dump-user-data FILE     Write the rendered cloud-config to FILE
+  --check                   Validate and report drift; changes no LXD state.
+                            Exits 1 when an existing container differs.
+  --dump-user-data FILE     Write the rendered cloud-config to FILE (create only)
   -y, --yes                 Skip interactive confirmations
   -V, --version             Show the version
   -h, --help                Show this help
 
 Command-line options override matching template directives.
+
+configure without --template is imperative: it applies exactly the given
+--config/--unset/--remove-device values, never prunes, and does not touch
+cigo metadata. With --template it is declarative and also removes config keys
+that cigo wrote earlier but the template no longer declares.
 
 The template is cloud-config. cigo: directives must start at column one and
 are removed before the file is passed to cloud-init.
@@ -542,6 +593,45 @@ cli_config_has_key() {
     return 1
 }
 
+# Whether the merged desired config (template plus --config) declares a key.
+config_declared() {
+    local item
+
+    for item in "${CT_CONFIG[@]}"; do
+        [[ ${item%%=*} == "$1" ]] && return 0
+    done
+    return 1
+}
+
+# Only template-declared keys become managed keys; --config is a one-off
+# override and must never cause a later prune.
+template_declares_key() {
+    local item
+
+    for item in "${TEMPLATE_CONFIG[@]}"; do
+        [[ ${item%%=*} == "$1" ]] && return 0
+    done
+    return 1
+}
+
+cli_unset_has_key() {
+    local key
+
+    for key in "${CLI_UNSET[@]}"; do
+        [[ $key == "$1" ]] && return 0
+    done
+    return 1
+}
+
+cli_removes_device() {
+    local device
+
+    for device in "${CLI_REMOVE_DEVICES[@]}"; do
+        [[ $device == "$1" ]] && return 0
+    done
+    return 1
+}
+
 # Command-line options take precedence over template directives.
 # image/profile/from are read by scan_meta, so CLI overrides are applied
 # before built-ins are computed (keeping %cigo.image% accurate).
@@ -724,6 +814,21 @@ parse_device_directive() {    local value=$1 type name token key source path
     DEVICE_ARGS["$name"]="${args[*]}"
 }
 
+# A short, human-readable name for the template, stored on the container so a
+# later redeploy/check can tell which template a container came from.
+template_label() {
+    local requested=$1 label
+
+    label=${requested%/}
+    case $label in
+        */template.yaml) label=${label%/template.yaml} ;;
+        *.yaml) label=${label%.yaml} ;;
+    esac
+    label=${label##*/}
+    [[ -n $label ]] || label=$requested
+    printf '%s' "$label"
+}
+
 load_template() {
     local raw substituted varname candidate requested=$TEMPLATE
     local -a candidates=()
@@ -744,6 +849,7 @@ load_template() {
     done
     [[ -n $TEMPLATE ]] || fail "Cannot read template: $requested"
     TEMPLATE_DIR=$(cd -- "$(dirname -- "$TEMPLATE")" && pwd)
+    TEMPLATE_LABEL=$(template_label "$requested")
     head -n 1 "$TEMPLATE" | grep -qx '#cloud-config' ||
         fail "Template must start with '#cloud-config': $TEMPLATE"
 
@@ -763,6 +869,7 @@ load_template() {
     done
     substituted=$(substitute_vars "$raw")
     parse_directives "$substituted"
+    TEMPLATE_CONFIG=("${CT_CONFIG[@]}")
     apply_cli_pipeline_overrides
 
     # Render sources live on the host now, so built-ins referenced only inside
@@ -777,22 +884,28 @@ load_template() {
     head -n 1 "$USER_DATA_FILE" | grep -qx '#cloud-config' ||
         fail "Template does not start with '#cloud-config' after removing directives."
 
-    validate_secrets
-    local has_render=false action
-    for action in "${ACTIONS[@]}"; do
-        [[ ${action%%|*} == render ]] && has_render=true
-    done
-    if ((${#CLI_SECRET_FILES[@]} || ${#CLI_SECRET_ENV[@]})); then
-        [[ $has_render == true ]] ||
-            fail "--secret-file and --secret-env require at least one cigo: render action."
+        # Secrets and the host render environment are only needed by verbs that run
+    # pipeline actions. configure and adopt never render, so a template with
+    # render actions must not force jinja2 or secret files on the host.
+    if verb_runs_actions; then
+        validate_secrets
+        local has_render=false action
+        for action in "${ACTIONS[@]}"; do
+            [[ ${action%%|*} == render ]] && has_render=true
+        done
+        if ((${#CLI_SECRET_FILES[@]} || ${#CLI_SECRET_ENV[@]})); then
+            [[ $has_render == true ]] ||
+                fail "--secret-file and --secret-env require at least one cigo: render action."
+        fi
+        [[ $has_render == false ]] || require_host_render
     fi
-    [[ $has_render == false ]] || require_host_render
 }
 
 vars_table() {
     local key
     local -a keys=()
 
+    ((${#VARS[@]})) || return 0
     mapfile -t keys < <(printf '%s\n' "${!VARS[@]}" | LC_ALL=C sort)
     ui 'Variables:\n'
     for key in "${keys[@]}"; do
@@ -874,18 +987,15 @@ print_preflight() {
     local item key current secret device
 
     ui '\n=== Preflight ===\n'
+    ui 'Verb: %s\nContainer: %s\n' "$VERB" "$NAME"
     if [[ $EXISTING_CT == true ]]; then
-        ui 'Container: %s\nTemplate image (creation only): %s\nTemplate: %s\n' \
-            "$NAME" "$IMAGE" "$TEMPLATE"
+        ui 'Template: %s\n' "${TEMPLATE:-(none)}"
+        ui 'Managed config keys: %s\n' "$( ((${#MANAGED_KEYS[@]})) && printf '%s' "${MANAGED_KEYS[*]}" || printf 'none')"
     else
-        ui 'Container: %s\nImage: %s\nTemplate: %s\n' "$NAME" "$IMAGE" "$TEMPLATE"
+        ui 'Image: %s\nTemplate: %s\n' "$IMAGE" "$TEMPLATE"
     fi
     if ((${#PROFILES[@]})); then
-        if [[ $EXISTING_CT == true ]]; then
-            ui 'Profiles (creation only): %s\n' "${PROFILES[*]}"
-        else
-            ui 'Profiles: %s\n' "${PROFILES[*]}"
-        fi
+        ui 'Profiles: %s\n' "${PROFILES[*]}"
     fi
     if [[ -n $FROM_SOURCE && $EXISTING_CT == false ]]; then
         print_inherited
@@ -893,12 +1003,14 @@ print_preflight() {
     vars_table
     if ((${#CT_CONFIG[@]})); then
         if [[ $EXISTING_CT == true ]]; then
-            ui 'Runtime config changes:\n'
+            ui 'Declared container config:\n'
             for item in "${CT_CONFIG[@]}"; do
                 key=${item%%=*}
-                current=$(lxc config get "$NAME" "$key" 2>/dev/null || true)
+                current=$(instance_config_value "$key")
                 if [[ $current == "${item#*=}" ]]; then
                     ui '  %s=%s (unchanged)\n' "$key" "$current"
+                elif [[ -z $current ]]; then
+                    ui '  %s=%s (new)\n' "$key" "${item#*=}"
                 else
                     ui '  %s=%s -> %s\n' "$key" "$current" "${item#*=}"
                 fi
@@ -908,11 +1020,17 @@ print_preflight() {
             for item in "${CT_CONFIG[@]}"; do ui '  %s\n' "$item"; done
         fi
     fi
+    if ((${#CLI_UNSET[@]})); then
+        ui 'Config to remove: %s\n' "${CLI_UNSET[*]}"
+    fi
     if ((${#DEVICE_NAMES[@]})); then
         ui 'Declared LXD devices (reconciled on every run):\n'
         for device in "${DEVICE_NAMES[@]}"; do
             ui '  %s %s %s\n' "$device" "${DEVICE_TYPES[$device]}" "${DEVICE_ARGS[$device]}"
         done
+    fi
+    if ((${#CLI_REMOVE_DEVICES[@]})); then
+        ui 'Devices to remove: %s\n' "${CLI_REMOVE_DEVICES[*]}"
     fi
     if ((${#CLI_SECRET_FILES[@]} || ${#CLI_SECRET_ENV[@]})); then
         ui 'Secrets (values are not displayed; render-only):\n'
@@ -948,7 +1066,8 @@ read_source() {
         INHERIT_CONFIG["$device"]=$(jq -r --arg key "$device" '.config[$key] // empty' \
             "$TMP_DIR/source.json")
         INHERIT_KEYS+=("$device")
-    done < <(jq -r '.config // {} | keys[] | select(test("^(volatile\\.|image\\.|cloud-init\\.)") | not)' \
+    done < <(jq -r '.config // {} | keys[]
+        | select(test("^(volatile\\.|image\\.|cloud-init\\.|user\\.cigo\\.)") | not)' \
         "$TMP_DIR/source.json")
 
     mapfile -t devices < <(
@@ -1635,18 +1754,199 @@ validate_user_data() {
     fi
 }
 
+# --- existing container: config, devices and cigo metadata ---------------
+
+# Read one key from the instance's local (not profile-expanded) config.
+instance_config_value() {
+    jq -r --arg key "$1" '.config[$key] // empty' "$TMP_DIR/current-local.json" 2>/dev/null || true
+}
+
+refresh_local_config() {
+    lxd_instance_local_json "$NAME" > "$TMP_DIR/current-local.json" ||
+        fail "Could not read the current configuration of $NAME."
+}
+
+read_managed_keys() {
+    local value
+
+    MANAGED_KEYS=()
+    value=$(instance_config_value "$META_MANAGED")
+    [[ -n $value ]] || return 0
+    IFS=',' read -r -a MANAGED_KEYS <<< "$value"
+    return 0
+}
+
+# The new managed-key set. On create it is the template's key list; afterwards
+# it is the previous set plus newly declared keys, minus keys that are no
+# longer declared (declarative run) or were explicitly unset.
+managed_keys_csv() {
+    local item key
+    local -A keep=()
+    local -a keys=()
+
+    if [[ $VERB == create ]]; then
+        for item in "${TEMPLATE_CONFIG[@]}"; do
+            key=${item%%=*}
+            cli_unset_has_key "$key" && continue
+            config_declared "$key" || continue
+            keep["$key"]=1
+        done
+    else
+        for key in "${MANAGED_KEYS[@]}"; do
+            [[ -n $key ]] || continue
+            cli_unset_has_key "$key" && continue
+            if ((${#TEMPLATE_CONFIG[@]})); then
+                config_declared "$key" || continue
+            fi
+            keep["$key"]=1
+        done
+        for item in "${TEMPLATE_CONFIG[@]}"; do
+            key=${item%%=*}
+            cli_unset_has_key "$key" && continue
+            config_declared "$key" || continue
+            keep["$key"]=1
+        done
+    fi
+
+    ((${#keep[@]})) || return 0
+    mapfile -t keys < <(printf '%s\n' "${!keep[@]}" | LC_ALL=C sort)
+    ((${#keys[@]})) || return 0
+    local IFS=,
+    printf '%s' "${keys[*]}"
+}
+
+# Metadata is written last, so a run that fails half-way never claims that
+# cigo manages a container it did not finish preparing.
+write_cigo_metadata() {
+    local stamp=$1 key value current
+
+    for key in "$META_VERSION" "$META_TEMPLATE" "$META_CREATED" "$META_ADOPTED"; do
+        case $key in
+            "$META_VERSION") value=$CIGO_VERSION ;;
+            "$META_TEMPLATE") value=$TEMPLATE_LABEL ;;
+            "$META_CREATED") [[ $stamp == created ]] || continue; value=$(date -u +%Y-%m-%dT%H:%M:%SZ) ;;
+            "$META_ADOPTED") [[ $stamp == adopted ]] || continue; value=$(date -u +%Y-%m-%dT%H:%M:%SZ) ;;
+        esac
+        [[ -n $value ]] || continue
+        current=$(lxc config get "$NAME" "$key" 2>/dev/null || true)
+        [[ $current == "$value" ]] && continue
+        lxc config set "$NAME" "$key" "$value" >/dev/null ||
+            fail "Could not write $key on $NAME."
+        ui 'Metadata: %s=%s\n' "$key" "$value"
+    done
+
+    # Imperative configure (no template, no unset) leaves the key list alone.
+    if [[ $VERB != create ]] && ((${#TEMPLATE_CONFIG[@]} == 0 && ${#CLI_UNSET[@]} == 0)); then
+        return 0
+    fi
+    value=$(managed_keys_csv)
+    current=$(lxc config get "$NAME" "$META_MANAGED" 2>/dev/null || true)
+    [[ $current == "$value" ]] && return 0
+    if [[ -z $value ]]; then
+        lxc config unset "$NAME" "$META_MANAGED" >/dev/null 2>&1 || true
+        ui 'Metadata: %s cleared\n' "$META_MANAGED"
+        return 0
+    fi
+    lxc config set "$NAME" "$META_MANAGED" "$value" >/dev/null ||
+        fail "Could not write $META_MANAGED on $NAME."
+    ui 'Metadata: %s=%s\n' "$META_MANAGED" "$value"
+}
+
+# Applies the desired config. In plan mode it prints the difference and sets
+# DRIFT instead of touching LXD.
 apply_runtime_config() {
     local item key desired current
 
     for item in "${CT_CONFIG[@]}"; do
         key=${item%%=*}
         desired=${item#*=}
-        current=$(lxc config get "$NAME" "$key" 2>/dev/null || true)
-        [[ $current == "$desired" ]] && continue
+        current=$(instance_config_value "$key")
+        if [[ $current == "$desired" ]]; then
+            [[ $PLAN_MODE == true ]] && ui '  = %s = %s\n' "$key" "$desired"
+            continue
+        fi
+        if [[ $PLAN_MODE == true ]]; then
+            if [[ -z $current ]]; then
+                ui '  + %s = %s\n' "$key" "$desired"
+            else
+                ui '  ~ %s: %s -> %s\n' "$key" "$current" "$desired"
+            fi
+            DRIFT=true
+            continue
+        fi
         if ! lxc config set "$NAME" "$key" "$desired"; then
             fail "LXD could not update $key on the existing container. The setting may require a stopped container or recreation; earlier config changes may already have applied."
         fi
         ui 'Updated container config: %s=%s\n' "$key" "$desired"
+    done
+}
+
+# Removes keys cigo wrote earlier that the template no longer declares. Only
+# keys recorded in managed-keys are candidates, so manual settings survive.
+prune_managed_config() {
+    local key current
+
+    ((${#TEMPLATE_CONFIG[@]})) || return 0
+    for key in "${MANAGED_KEYS[@]}"; do
+        [[ -n $key ]] || continue
+        config_declared "$key" && continue
+        cli_unset_has_key "$key" && continue
+        current=$(instance_config_value "$key")
+        [[ -n $current ]] || continue
+        if [[ $PLAN_MODE == true ]]; then
+            ui '  - %s = %s  (no longer declared)\n' "$key" "$current"
+            DRIFT=true
+            continue
+        fi
+        lxc config unset "$NAME" "$key" ||
+            fail "Could not remove $key from $NAME."
+        ui 'Removed container config: %s (was %s)\n' "$key" "$current"
+    done
+}
+
+apply_cli_unset() {
+    local key current
+
+    for key in "${CLI_UNSET[@]}"; do
+        if config_declared "$key"; then
+            fail "--unset $key conflicts with a config key declared by the template."
+        fi
+        current=$(instance_config_value "$key")
+        if [[ -z $current ]]; then
+            [[ $PLAN_MODE == true ]] && ui '  = %s (not set)\n' "$key"
+            continue
+        fi
+        if [[ $PLAN_MODE == true ]]; then
+            ui '  - %s = %s  (--unset)\n' "$key" "$current"
+            DRIFT=true
+            continue
+        fi
+        lxc config unset "$NAME" "$key" ||
+            fail "Could not unset $key on $NAME."
+        ui 'Unset container config: %s (was %s)\n' "$key" "$current"
+    done
+}
+
+apply_removed_devices() {
+    local device
+
+    ((${#CLI_REMOVE_DEVICES[@]})) || return 0
+    for device in "${CLI_REMOVE_DEVICES[@]}"; do
+        if [[ ${DEVICE_TYPES[$device]+present} ]]; then
+            fail "--remove-device $device conflicts with a device declared by the template."
+        fi
+        if ! jq -e --arg device "$device" '.devices[$device] != null' \
+            "$TMP_DIR/current-local.json" >/dev/null; then
+            fail "Device $device does not exist on $NAME."
+        fi
+        if [[ $PLAN_MODE == true ]]; then
+            ui '  - device %s\n' "$device"
+            DRIFT=true
+            continue
+        fi
+        lxc config device remove "$NAME" "$device" ||
+            fail "Could not remove device $device from $NAME."
+        ui 'Removed device: %s\n' "$device"
     done
 }
 
@@ -1686,7 +1986,19 @@ reconcile_device() {
                     ($config[$key] | if type == "string" then . else tostring end)
                   else "" end' \
                 "$TMP_DIR/device-local.json")
-            [[ $current == "$value" ]] && continue
+            if [[ $current == "$value" ]]; then
+                [[ $PLAN_MODE == true ]] && ui '  = device %s %s=%s\n' "$device" "$key" "$value"
+                continue
+            fi
+            if [[ $PLAN_MODE == true ]]; then
+                if [[ -z $current ]]; then
+                    ui '  + device %s %s=%s\n' "$device" "$key" "$value"
+                else
+                    ui '  ~ device %s %s: %s -> %s\n' "$device" "$key" "$current" "$value"
+                fi
+                DRIFT=true
+                continue
+            fi
             if ! lxc config device set "$NAME" "$device" "$key" "$value"; then
                 if [[ $type == proxy && $key == listen ]]; then
                     fail "Could not update proxy device $device listen address; it may already be in use. cigo does not change declared ports automatically; earlier device changes may already have applied."
@@ -1701,12 +2013,22 @@ reconcile_device() {
             "$TMP_DIR/device-local.json")
         for key in "${current_keys[@]}"; do
             device_has_argument "$device" "$key" && continue
+            if [[ $PLAN_MODE == true ]]; then
+                ui '  - device %s %s  (no longer declared)\n' "$device" "$key"
+                DRIFT=true
+                continue
+            fi
             if ! lxc config device unset "$NAME" "$device" "$key"; then
                 fail "Could not remove undeclared option $key from device $device; earlier device changes may already have applied."
             fi
             ui 'Removed undeclared device option: %s %s\n' "$device" "$key"
         done
     else
+        if [[ $PLAN_MODE == true ]]; then
+            ui '  + device %s (%s) %s\n' "$device" "$type" "${DEVICE_ARGS[$device]}"
+            DRIFT=true
+            return 0
+        fi
         if ! lxc config device add "$NAME" "$device" "$type" "${args[@]}"; then
             if [[ $type == proxy ]]; then
                 fail "Could not add proxy device $device. Check whether its listen address is available; cigo does not change declared ports automatically."
@@ -1726,12 +2048,141 @@ apply_declared_devices() {
     done
 }
 
-create_container() {
-    local item profile answer
-    local -a profile_args=()
+# Reports config keys that neither the template nor cigo owns. Informational
+# only: it never changes the exit status.
+report_unmanaged_config() {
+    local key candidate managed
 
+    while IFS= read -r key; do
+        [[ -n $key ]] || continue
+        config_declared "$key" && continue
+        cli_unset_has_key "$key" && continue
+        managed=false
+        for candidate in "${MANAGED_KEYS[@]}"; do
+            [[ $candidate == "$key" ]] && managed=true
+        done
+        [[ $managed == true ]] && continue
+        ui '  ? %s = %s  (set outside cigo)\n' "$key" "$(instance_config_value "$key")"
+    done < <(jq -r '.config // {} | keys[]
+        | select(test("^(volatile\\.|image\\.|cloud-init\\.|user\\.cigo\\.)") | not)' \
+        "$TMP_DIR/current-local.json" | LC_ALL=C sort)
+}
+
+report_undeclared_devices() {
+    local device
+
+    while IFS= read -r device; do
+        [[ -n $device ]] || continue
+        [[ ${DEVICE_TYPES[$device]+present} ]] && continue
+        cli_removes_device "$device" && continue
+        ui '  ? device %s  (present but not declared)\n' "$device"
+    done < <(jq -r '.devices // {} | to_entries[]
+        | select(.key != "root" and .value.type != "nic") | .key' \
+        "$TMP_DIR/current-local.json" | LC_ALL=C sort)
+}
+
+# Shared by --check and --dry-run. Every apply_* function switches to reporting
+# when PLAN_MODE is set, so the plan cannot drift from what a real run does.
+print_drift_report() {
+    ui '\n=== Config ===\n'
+    if ((${#CT_CONFIG[@]})); then
+        apply_runtime_config
+    else
+        ui '  no config keys declared\n'
+    fi
+    prune_managed_config
+    apply_cli_unset
+
+    ui '\n=== Devices ===\n'
+    if ((${#DEVICE_NAMES[@]})); then
+        apply_declared_devices disk
+        apply_declared_devices proxy
+    else
+        ui '  no devices declared\n'
+    fi
+    apply_removed_devices
+
+    ui '\n=== Not managed by cigo ===\n'
+    report_unmanaged_config
+    report_undeclared_devices
+}
+
+reconcile_container() {
+    local action_count=${#ACTIONS[@]}
+
+    if [[ $action_count -gt 0 && $VERB != redeploy ]]; then
+        ui 'Note: the template declares %d pipeline action(s); %s does not run them.\n' \
+            "$action_count" "$VERB"
+    fi
+
+    if [[ $CHECK_ONLY == true || $DRY_RUN == true ]]; then
+        PLAN_MODE=true
+        if [[ $VERB == redeploy ]]; then
+            validate_actions
+            validate_renders
+        fi
+        print_drift_report
+        if [[ $CHECK_ONLY == true ]]; then
+            if [[ $DRIFT == true ]]; then
+                ui '\nDrift detected: %s differs from the declared state.\n' "$NAME"
+                exit 1
+            fi
+            ui '\nNo drift: %s matches the declared state.\n' "$NAME"
+            exit 0
+        fi
+        ui '\nDry run complete; no LXD state was changed.\n'
+        exit 0
+    fi
+
+    confirm "Apply $VERB to $NAME?" || fail "Cancelled; no changes were made."
+
+    apply_runtime_config
+    prune_managed_config
+    apply_cli_unset
+    apply_declared_devices disk
+    apply_declared_devices proxy
+    apply_removed_devices
+    if [[ $VERB == redeploy ]]; then
+        execute_actions
+    fi
+
+    case $VERB in
+        adopt) write_cigo_metadata adopted ;;
+        *) write_cigo_metadata existing ;;
+    esac
+
+    case $VERB in
+        adopt) ui '\nContainer adopted: %s\n' "$NAME" ;;
+        redeploy) ui '\nRe-deploy completed: %s\n' "$NAME" ;;
+        *) ui '\nConfiguration applied: %s\n' "$NAME" ;;
+    esac
+}
+
+validate_unset_conflicts() {
+    local key
+
+    for key in "${CLI_UNSET[@]}"; do
+        config_declared "$key" &&
+            fail "--unset $key conflicts with a config key declared by the template."
+    done
+    return 0
+}
+
+validate_remove_device_conflicts() {
+    local device
+
+    for device in "${CLI_REMOVE_DEVICES[@]}"; do
+        [[ ${DEVICE_TYPES[$device]+present} ]] &&
+            fail "--remove-device $device conflicts with a device declared by the template."
+    done
+    return 0
+}
+
+run_verb() {
     [[ -n $NAME ]] || fail "Required option missing: --name."
-    [[ -n $TEMPLATE ]] || fail "Required option missing: --template."
+    if [[ $VERB != configure ]]; then
+        [[ -n $TEMPLATE ]] || fail "Required option missing: --template."
+    fi
     validate_name "$NAME"
     require_lxc
     lxc info >/dev/null 2>&1 || fail "LXD is not available."
@@ -1740,9 +2191,38 @@ create_container() {
     if lxc info "$NAME" >/dev/null 2>&1; then
         EXISTING_CT=true
     fi
-    load_template
 
-    if [[ $EXISTING_CT == false ]]; then
+    if [[ $VERB == create && $EXISTING_CT == true ]]; then
+        fail "Container $NAME already exists; use 'redeploy' to reapply a template, or 'configure' to change LXD config only."
+    fi
+    if [[ $VERB != create && $EXISTING_CT == false ]]; then
+        fail "Container $NAME does not exist; use 'create' to create it."
+    fi
+
+    if [[ -n $TEMPLATE ]]; then
+        load_template
+    else
+        CT_CONFIG=("${CLI_CONFIG[@]}")
+        if ((${#CT_CONFIG[@]} == 0 && ${#CLI_UNSET[@]} == 0 && ${#CLI_REMOVE_DEVICES[@]} == 0)); then
+            fail "Nothing to configure: pass --config, --unset, --remove-device, or --template."
+        fi
+    fi
+
+    if [[ $EXISTING_CT == true ]]; then
+        refresh_local_config
+        read_managed_keys
+        if ((${#CLI_UNSET[@]})); then validate_unset_conflicts; fi
+        if ((${#CLI_REMOVE_DEVICES[@]})); then validate_remove_device_conflicts; fi
+        if [[ -z $(instance_config_value "$META_VERSION") ]]; then
+            case $VERB in
+                redeploy)
+                    fail "Container $NAME is not managed by cigo (no $META_VERSION); use 'adopt' to take it over, or 'configure' to change LXD config only." ;;
+                adopt) ;;
+                *)
+                    ui 'Note: %s is not managed by cigo yet; configure only changes live LXD state.\n' "$NAME" ;;
+            esac
+        fi
+    else
         read_source
     fi
     validate_device_name_conflicts
@@ -1750,6 +2230,12 @@ create_container() {
     if [[ -n $DUMP_USER_DATA ]]; then write_dumped_user_data; fi
 
     print_preflight
+
+    if [[ $EXISTING_CT == true ]]; then
+        reconcile_container
+        return 0
+    fi
+
     if [[ $CHECK_ONLY == true ]]; then
         validate_actions
         validate_renders
@@ -1765,32 +2251,12 @@ create_container() {
         return 0
     fi
 
-    if [[ $EXISTING_CT == true ]]; then
-        ui '\nContainer %s already exists; cloud-init and creation settings are not reapplied.\n' "$NAME"
-        ui '        Only live LXD config changes, declared devices, and pipeline actions will be applied.\n'
-        if [[ -n $FROM_SOURCE || -n $CLI_FROM || ${#PROFILES[@]} -gt 0 || $IMAGE != "$DEFAULT_IMAGE" ]]; then
-            warn 'Image, profiles, and source inheritance apply only when creating a new container.\n'
-        fi
-        if ((${#ACTIONS[@]} == 0 && ${#CT_CONFIG[@]} == 0 && ${#DEVICE_NAMES[@]} == 0)); then
-            fail "The template contains no pipeline actions, container config changes, or device declarations."
-        fi
-        if [[ $ASSUME_YES == true ]]; then
-            ui 'Continuing (--yes).\n'
-        else
-            err 'Continue with re-deploy? [y/N] '
-            read -r answer || answer=n
-            case $answer in
-                y|Y|yes|YES) ;;
-                *) fail "Cancelled; no changes were made." ;;
-            esac
-        fi
-        apply_runtime_config
-        apply_declared_devices disk
-        apply_declared_devices proxy
-        execute_actions
-        ui '\nRe-deploy completed: %s\n' "$NAME"
-        return 0
-    fi
+    create_new_container
+}
+
+create_new_container() {
+    local item profile
+    local -a profile_args=()
 
     confirm "Create $NAME from image $IMAGE?" || fail "Creation cancelled."
 
@@ -1815,7 +2281,129 @@ create_container() {
     handle_proxy_devices
     execute_actions
 
+    write_cigo_metadata created
+
     ui '\nContainer is ready: %s\n' "$NAME"
+}
+
+# Verbs only differ in which layers they apply, so one option parser serves
+# all of them and each verb rejects the options that cannot mean anything.
+verb_runs_actions() {
+    [[ $VERB == create || $VERB == redeploy ]]
+}
+
+validate_config_key() {
+    local key=$1 what=$2
+
+    [[ $key =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] ||
+        fail "Invalid LXD config key for $what: $key"
+    [[ $key != volatile.* ]] ||
+        fail "$what cannot target an LXD-managed key: $key"
+    [[ $key != "$META_PREFIX"* ]] ||
+        fail "$what cannot target cigo metadata: $key"
+}
+
+validate_device_name_argument() {
+    local device=$1 what=$2
+
+    [[ $device =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $device != root ]] ||
+        fail "Invalid device name for $what: $device"
+}
+
+parse_options() {
+    while (($#)); do
+        case $1 in
+            --name)
+                (($# >= 2)) || fail "Missing value after --name."
+                NAME=$2; shift 2 ;;
+            --template)
+                (($# >= 2)) || fail "Missing value after --template."
+                TEMPLATE=$2; shift 2 ;;
+            --image)
+                (($# >= 2)) || fail "Missing value after --image."
+                [[ -n $2 ]] || fail "--image requires a non-empty value."
+                CLI_IMAGE=$2; shift 2 ;;
+            --from)
+                (($# >= 2)) || fail "Missing value after --from."
+                [[ -n $2 ]] || fail "--from requires a non-empty value."
+                CLI_FROM=$2; shift 2 ;;
+            --profile)
+                (($# >= 2)) || fail "Missing value after --profile."
+                [[ -n $2 ]] || fail "--profile requires a non-empty value."
+                CLI_PROFILES+=("$2"); shift 2 ;;
+            --config)
+                (($# >= 2)) || fail "Missing value after --config."
+                [[ $2 == *=* ]] || fail "--config expects KEY=VALUE: $2"
+                CLI_CONFIG+=("$2"); shift 2 ;;
+            --unset)
+                (($# >= 2)) || fail "Missing value after --unset."
+                CLI_UNSET+=("$2"); shift 2 ;;
+            --remove-device)
+                (($# >= 2)) || fail "Missing value after --remove-device."
+                CLI_REMOVE_DEVICES+=("$2"); shift 2 ;;
+            --timeout)
+                (($# >= 2)) || fail "Missing value after --timeout."
+                [[ $2 =~ ^[0-9]+$ ]] || fail "--timeout expects a number of seconds: $2"
+                CLI_TIMEOUT=$2; shift 2 ;;
+            --log)
+                (($# >= 2)) || fail "Missing value after --log."
+                valid_log_mode "$2" ||
+                    fail "--log expects journal|cloud-init|output|both|none: $2"
+                CLI_LOG=$2; shift 2 ;;
+            --var)
+                (($# >= 2)) || fail "Missing value after --var."
+                [[ $2 == *=* ]] || fail "--var expects NAME=VALUE: $2"
+                CLI_VARS+=("$2"); shift 2 ;;
+            --secret-file)
+                (($# >= 2)) || fail "Missing value after --secret-file."
+                [[ $2 == *=* ]] || fail "--secret-file expects NAME=FILE: $2"
+                CLI_SECRET_FILES+=("$2"); shift 2 ;;
+            --secret-env)
+                (($# >= 2)) || fail "Missing value after --secret-env."
+                CLI_SECRET_ENV+=("$2"); shift 2 ;;
+            --dry-run)
+                DRY_RUN=true; shift ;;
+            --check)
+                CHECK_ONLY=true; shift ;;
+            --dump-user-data)
+                (($# >= 2)) || fail "Missing value after --dump-user-data."
+                [[ -n $2 ]] || fail "--dump-user-data requires a file path."
+                DUMP_USER_DATA=$2; shift 2 ;;
+            -y|--yes)
+                ASSUME_YES=true; shift ;;
+            -h|--help)
+                usage; exit 0 ;;
+            *)
+                usage >&2; fail "Unknown option: $1" ;;
+        esac
+    done
+
+    local key device
+    if [[ $VERB != create ]]; then
+        [[ -z $CLI_IMAGE ]] || fail "--image applies only to create."
+        [[ -z $CLI_FROM ]] || fail "--from applies only to create."
+        ((${#CLI_PROFILES[@]} == 0)) || fail "--profile applies only to create; profiles are set at creation time."
+        [[ -z $CLI_TIMEOUT ]] || fail "--timeout applies only to create."
+        [[ -z $CLI_LOG ]] || fail "--log applies only to create."
+        [[ -z $DUMP_USER_DATA ]] || fail "--dump-user-data applies only to create."
+    fi
+    if [[ $VERB != configure && $VERB != redeploy ]]; then
+        ((${#CLI_UNSET[@]} == 0)) || fail "--unset applies only to configure and redeploy."
+        ((${#CLI_REMOVE_DEVICES[@]} == 0)) ||
+            fail "--remove-device applies only to configure and redeploy."
+    fi
+    if ! verb_runs_actions; then
+        ((${#CLI_SECRET_FILES[@]} == 0 && ${#CLI_SECRET_ENV[@]} == 0)) ||
+            fail "--secret-file and --secret-env apply only to create and redeploy, which run actions."
+    fi
+
+    for key in "${CLI_UNSET[@]}"; do
+        validate_config_key "$key" "--unset"
+    done
+    for device in "${CLI_REMOVE_DEVICES[@]}"; do
+        validate_device_name_argument "$device" "--remove-device"
+    done
+    return 0
 }
 
 main() {
@@ -1824,68 +2412,10 @@ main() {
     shift
 
     case $command in
-        create)
-            while (($#)); do
-                case $1 in
-                    --name)
-                        (($# >= 2)) || fail "Missing value after --name."
-                        NAME=$2; shift 2 ;;
-                    --template)
-                        (($# >= 2)) || fail "Missing value after --template."
-                        TEMPLATE=$2; shift 2 ;;
-                    --image)
-                        (($# >= 2)) || fail "Missing value after --image."
-                        [[ -n $2 ]] || fail "--image requires a non-empty value."
-                        CLI_IMAGE=$2; shift 2 ;;
-                    --from)
-                        (($# >= 2)) || fail "Missing value after --from."
-                        [[ -n $2 ]] || fail "--from requires a non-empty value."
-                        CLI_FROM=$2; shift 2 ;;
-                    --profile)
-                        (($# >= 2)) || fail "Missing value after --profile."
-                        [[ -n $2 ]] || fail "--profile requires a non-empty value."
-                        CLI_PROFILES+=("$2"); shift 2 ;;
-                    --config)
-                        (($# >= 2)) || fail "Missing value after --config."
-                        [[ $2 == *=* ]] || fail "--config expects KEY=VALUE: $2"
-                        CLI_CONFIG+=("$2"); shift 2 ;;
-                    --timeout)
-                        (($# >= 2)) || fail "Missing value after --timeout."
-                        [[ $2 =~ ^[0-9]+$ ]] || fail "--timeout expects a number of seconds: $2"
-                        CLI_TIMEOUT=$2; shift 2 ;;
-                    --log)
-                        (($# >= 2)) || fail "Missing value after --log."
-                        valid_log_mode "$2" ||
-                            fail "--log expects journal|cloud-init|output|both|none: $2"
-                        CLI_LOG=$2; shift 2 ;;
-                    --var)
-                        (($# >= 2)) || fail "Missing value after --var."
-                        [[ $2 == *=* ]] || fail "--var expects NAME=VALUE: $2"
-                        CLI_VARS+=("$2"); shift 2 ;;
-                    --secret-file)
-                        (($# >= 2)) || fail "Missing value after --secret-file."
-                        [[ $2 == *=* ]] || fail "--secret-file expects NAME=FILE: $2"
-                        CLI_SECRET_FILES+=("$2"); shift 2 ;;
-                    --secret-env)
-                        (($# >= 2)) || fail "Missing value after --secret-env."
-                        CLI_SECRET_ENV+=("$2"); shift 2 ;;
-                    --dry-run)
-                        DRY_RUN=true; shift ;;
-                    --check)
-                        CHECK_ONLY=true; shift ;;
-                    --dump-user-data)
-                        (($# >= 2)) || fail "Missing value after --dump-user-data."
-                        [[ -n $2 ]] || fail "--dump-user-data requires a file path."
-                        DUMP_USER_DATA=$2; shift 2 ;;
-                    -y|--yes)
-                        ASSUME_YES=true; shift ;;
-                    -h|--help)
-                        usage; exit 0 ;;
-                    *)
-                        usage >&2; fail "Unknown option: $1" ;;
-                esac
-            done
-            create_container
+        create|redeploy|configure|adopt)
+            VERB=$command
+            parse_options "$@"
+            run_verb
             ;;
         -h|--help) usage ;;
         -V|--version|version) printf 'cigo %s\n' "$CIGO_VERSION" ;;

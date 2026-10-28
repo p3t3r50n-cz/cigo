@@ -18,15 +18,56 @@ instructions belong in [README.md](README.md).
 4. For a new container, create it, inherit eligible source config/devices,
    apply container config and declared disk devices, upload user-data, start
    it, wait for cloud-init, then add declared proxy devices.
-5. For an existing container, update container config and declared devices.
-6. Run pipeline actions for both new and existing containers. Render actions
-   render on the host and push only the result.
+5. For an existing container, update container config, prune stale managed
+   keys, and reconcile declared devices.
+6. Run pipeline actions for `create` and `redeploy`. Render actions render on
+   the host and push only the result.
 
 For an existing container, image, profiles, source inheritance, and cloud-init
 user-data are creation-only. `cigo: config` values are compared with the
 current values and sent to `lxc config set`; LXD decides whether each change
 can be applied to a running container. A rejected change stops the run, but
 does not roll back earlier successful changes.
+
+## Verbs
+
+The verbs exist because one command whose behaviour depends on whether the
+container exists is ambiguous: a typo in `--name` turns "create" into a silent
+partial re-deploy. Each verb now states its intent and the target is checked
+before anything happens.
+
+| Verb | Target | Config | Devices | Actions | Cloud-init |
+|---|---|---|---|---|---|
+| `create` | must not exist | yes | yes | yes | yes |
+| `redeploy` | exists, managed by cigo | yes | yes | yes | no |
+| `configure` | exists, any owner | yes | yes | no | no |
+| `adopt` | exists, not managed by cigo | yes | yes | no | no |
+
+`configure` and `adopt` gate everything that depends on running actions, so a
+template with `cigo: render` does not require `python3-jinja2` or secret files
+on the host for those verbs.
+
+## Managed keys and container metadata
+
+State lives on the container, in LXD's reserved `user.*` namespace, so there
+is no state file to lose and the state travels with the container:
+`user.cigo.version`, `user.cigo.template`, `user.cigo.created-at` (or
+`adopted-at`), and `user.cigo.managed-keys`.
+
+`managed-keys` is the safety valve for declarative cleanup. `configure
+--template` and `redeploy` remove a key only if it is in that list and the
+template no longer declares it. Consequences:
+
+- Keys set by hand are never removed, because cigo never recorded them.
+- `--config` on the command line is applied but not recorded, so it cannot be
+  pruned by surprise on a later run.
+- `configure` without `--template` is imperative: no pruning at all, and the
+  metadata is left alone.
+- Whole devices are never deleted implicitly. `--check` reports them and
+  `--remove-device` deletes them on request.
+- Metadata is written last, so a run that fails half-way does not claim
+  management of a container it did not finish preparing.
+- `--from` filters `user.cigo.*` out of the inherited config.
 
 `cigo: device disk|proxy` declarations are reconciled on create and every
 re-deploy. Declared devices are updated to match their arguments; omitted
@@ -148,10 +189,18 @@ checked as soon as a template declares a render action.
 
 - `--dry-run` performs read-only LXD queries, prints the plan, and never
   applies container or device changes.
-- `--check` validates action sources, device declarations, secret availability,
-  and every render without changing LXD state. The cloud-config schema check
-  uses `cloud-init` when installed and is skipped with a warning otherwise, so
-  the command stays usable in CI without that package.
+- `--check` on a new container validates action sources, device declarations,
+  secret availability, and every render without changing LXD state. The
+  cloud-config schema check uses `cloud-init` when installed and is skipped
+  with a warning otherwise, so the command stays usable in CI without that
+  package.
+- `--check` on an existing container is a drift report: it lists config keys
+  to add, change, or remove, device differences, and settings made outside
+  cigo. It exits 1 when the container differs from the declared state and 0
+  when it matches, which makes it usable as a CI drift gate. Keys set outside
+  cigo are listed for information and never count as drift.
+- `--dry-run` and `--check` share the planning code with the applying code, so
+  the printed plan cannot drift from what a real run does.
 - `--dump-user-data` writes the exact transformed user-data with mode `0600`.
 - Confirmation defaults to no. `--yes` is explicit consent to changes;
   inherited proxy handoffs are still skipped, while explicitly declared
