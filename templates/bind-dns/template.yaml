@@ -1,0 +1,27 @@
+#cloud-config
+# Authoritative-only BIND starter for the reserved example.test zone.
+# Zone files are rendered on the host from files/ on every run, so a changed
+# --var DNS_ZONE or DNS_IP is applied by a re-deploy; run with:
+# --template templates/bind-dns
+cigo: image ubuntu:24.04
+cigo: profile default
+cigo: config limits.memory=1GiB
+cigo: config limits.cpu=1
+cigo: var DNS_ZONE=example.test
+cigo: var DNS_IP=192.0.2.10
+
+package_update: true
+package_upgrade: true
+
+cigo: packages bind9 bind9-utils
+
+cigo: render files/named.conf.options /etc/bind/named.conf.options 0644
+cigo: render files/named.conf.local.j2 /etc/bind/named.conf.local 0644
+cigo: render files/db.zone.j2 /etc/bind/db.%DNS_ZONE% 0644
+cigo: run chown root:bind /etc/bind/named.conf.options /etc/bind/named.conf.local /etc/bind/db.%DNS_ZONE%
+cigo: run named-checkconf
+cigo: run named-checkzone %DNS_ZONE% /etc/bind/db.%DNS_ZONE%
+# Ubuntu ships named.service; bind9.service is only an alias and cannot be
+# enabled directly.
+cigo: run systemctl enable named
+cigo: run systemctl restart named

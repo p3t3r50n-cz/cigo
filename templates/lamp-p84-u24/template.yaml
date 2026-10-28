@@ -1,0 +1,69 @@
+#cloud-config
+#
+# Upgrade lamp-p80-u22 to Ubuntu 24.04 with PHP 8.4.
+# This creates a new container rather than upgrading the existing OS in place.
+#
+#   ./cigo.sh create --name lamp-p84-u24 --template templates/lamp-p84-u24
+#
+# Proxy devices such as SSH port forwards conflict with the running source.
+# cigo prompts for a handoff; --yes skips proxy devices.
+
+cigo: image ubuntu:24.04
+cigo: profile default
+
+# Inherit selected config and non-network devices from the source container.
+cigo: from lamp-p80-u22
+
+# PHP version for the new container.
+cigo: var PHP_VERSION=8.4
+
+cigo: config limits.memory=2GiB
+cigo: config limits.cpu=2
+cigo: config security.nesting=true
+
+cigo: timeout 1800
+
+# --- bootstrap (first boot only) ---------------------------------------------
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - mc
+
+write_files:
+  - path: /etc/apache2/conf-available/remoteip.conf
+    permissions: '0644'
+    content: |
+      RemoteIPHeader X-Forwarded-For
+      RemoteIPTrustedProxy %cigo.gateway%
+
+# --- pipeline (every invocation, in declaration order) -----------------------
+
+# 1) Tools required to add the package repository.
+cigo: packages software-properties-common ca-certificates curl
+
+# 2) Add the Ondrej PHP PPA and install PHP 8.4.
+cigo: run add-apt-repository -y ppa:ondrej/php
+cigo: run apt-get update -qq
+cigo: packages apache2 libapache2-mod-php%PHP_VERSION% php%PHP_VERSION%-cli php%PHP_VERSION%-common php%PHP_VERSION%-curl php%PHP_VERSION%-gd php%PHP_VERSION%-mbstring php%PHP_VERSION%-mysql php%PHP_VERSION%-opcache php%PHP_VERSION%-readline php%PHP_VERSION%-xml php%PHP_VERSION%-zip
+
+# 3) Copy only Apache virtual hosts from the old container. Copying all of
+#    /etc/apache2 could carry obsolete modules and version-specific settings.
+cigo: sync-ct lamp-p80-u22 /etc/apache2/sites-available
+cigo: sync-ct lamp-p80-u22 /etc/apache2/sites-enabled
+
+# 4) Copy application data without deleting files from the destination.
+cigo: copy-ct lamp-p80-u22 /var/www
+
+# 5) Enable Apache modules and configuration.
+cigo: run a2enmod rewrite remoteip
+cigo: run a2enconf remoteip
+
+# 6) Install Composer from its official source.
+cigo: run sh -c 'set -e; d=$(mktemp -d); cd "$d"; curl -fsSL https://composer.github.io/installer.sig -o i.sig; curl -fsSL https://getcomposer.org/installer -o c.php; [ "$(cat i.sig)" = "$(php -r "echo hash_file(\"sha384\",\"c.php\");")" ] || { echo "SHA384 mismatch" >&2; exit 1; }; php c.php --quiet --install-dir=/usr/local/bin --filename=composer; cd /; rm -rf "$d"; composer --version'
+
+# 7) Enable services and verify the installed versions.
+cigo: run systemctl enable apache2
+cigo: run systemctl restart apache2
+cigo: run sh -c 'php -v | head -1; apache2ctl -M | grep -E "rewrite|remoteip"'

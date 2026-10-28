@@ -1,0 +1,9 @@
+#cloud-config
+# Fast fixture: no packages, so a container is ready in a few seconds.
+cigo: profile default
+cigo: config limits.memory=192MiB
+cigo: var GREETING=hello
+cigo: render files/app.conf.j2 /etc/cigo-it/app.conf 0640
+
+package_update: false
+package_upgrade: false

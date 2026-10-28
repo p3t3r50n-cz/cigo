@@ -1,0 +1,23 @@
+#cloud-config
+# Minimal Apache virtual host for static content. TLS and DNS are configured
+# separately. The virtual host is rendered on the host from files/ on every
+# run, so a changed --var SITE_DOMAIN or an edited files/vhost.conf.j2 is
+# applied by a re-deploy; run with: --template templates/apache-hosting
+cigo: image ubuntu:24.04
+cigo: profile default
+cigo: config limits.memory=1GiB
+cigo: config limits.cpu=1
+cigo: var SITE_DOMAIN=example.test
+
+package_update: true
+package_upgrade: true
+
+cigo: packages apache2
+
+cigo: render files/vhost.conf.j2 /etc/apache2/sites-available/%SITE_DOMAIN%.conf 0644
+cigo: run install -d -o www-data -g www-data -m 0755 /srv/www/%SITE_DOMAIN%/public
+cigo: run a2dissite 000-default
+cigo: run a2ensite %SITE_DOMAIN%.conf
+cigo: run apache2ctl configtest
+cigo: run systemctl enable --now apache2
+cigo: run systemctl reload apache2

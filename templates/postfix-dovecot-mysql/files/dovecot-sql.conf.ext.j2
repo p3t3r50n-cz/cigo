@@ -1,0 +1,5 @@
+driver = mysql
+connect = host=127.0.0.1 dbname=mail user=mailreader password={{ secrets.DB_PASSWORD }}
+default_pass_scheme = SHA512-CRYPT
+password_query = SELECT email AS user, password_hash AS password FROM mailbox WHERE email = '%u' AND active = 1
+user_query = SELECT 5000 AS uid, 5000 AS gid, CONCAT('/var/vmail/', domain, '/', localpart) AS home, CONCAT('maildir:/var/vmail/', domain, '/', localpart) AS mail FROM mailbox WHERE email = '%u' AND active = 1

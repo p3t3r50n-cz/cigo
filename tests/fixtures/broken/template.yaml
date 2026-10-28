@@ -1,0 +1,6 @@
+#cloud-config
+# Fixture that must fail during the host render.
+cigo: render files/broken.j2 /etc/cigo-it/broken.conf
+
+package_update: false
+package_upgrade: false

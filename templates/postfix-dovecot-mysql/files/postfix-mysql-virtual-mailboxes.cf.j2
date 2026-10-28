@@ -1,0 +1,5 @@
+user = mailreader
+password = {{ secrets.DB_PASSWORD }}
+hosts = 127.0.0.1
+dbname = mail
+query = SELECT CONCAT(domain, '/', localpart, '/') FROM mailbox WHERE email = '%s' AND active = 1

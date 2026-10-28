@@ -1,0 +1,33 @@
+#cloud-config
+# PHP 8.2 hosting on Ubuntu 24.04: Apache with mod_php from the Ondrej PPA, a
+# handful of common extensions and Postfix for local mail. Run with:
+#   ./cigo.sh create --name php-01 --template templates/php-hosting-apache
+#
+cigo: image ubuntu:24.04
+cigo: profile default
+cigo: config limits.memory=4GiB
+cigo: config limits.cpu=2
+cigo: config limits.cpu.allowance=50%
+cigo: config security.nesting=true
+cigo: config boot.autostart=true
+cigo: timeout 1800
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - apache2
+  - imagemagick
+  - mc
+  - postfix
+
+# Add the PHP repository in bootcmd, which runs before package installation.
+bootcmd:
+  - [ sh, -c, 'apt-get update -qq' ]
+  - [ sh, -c, 'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq software-properties-common ca-certificates curl' ]
+  - [ sh, -c, 'cloud-init-per once cigo-sury add-apt-repository -y ppa:ondrej/php' ]
+  - [ sh, -c, 'apt-get update -qq' ]
+
+runcmd:
+  - [ sh, -c, 'a2enmod rewrite' ]
+  - [ sh, -c, 'systemctl enable apache2' ]

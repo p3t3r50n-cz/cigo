@@ -1,0 +1,12 @@
+$TTL 3600
+@   IN SOA ns1.{{ DNS_ZONE }}. hostmaster.{{ DNS_ZONE }}. (
+        2026010101 ; serial: increase after every zone change
+        3600       ; refresh
+        900        ; retry
+        1209600    ; expire
+        300        ; negative cache TTL
+    )
+    IN NS  ns1.{{ DNS_ZONE }}.
+ns1 IN A   {{ DNS_IP }}
+@   IN A   {{ DNS_IP }}
+www IN A   {{ DNS_IP }}

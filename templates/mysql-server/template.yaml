@@ -1,0 +1,12 @@
+#cloud-config
+# Standalone MySQL server. The default configuration is not exposed for remote access.
+cigo: image ubuntu:24.04
+cigo: profile default
+cigo: config limits.memory=2GiB
+cigo: config limits.cpu=2
+
+package_update: true
+package_upgrade: true
+
+cigo: packages mysql-server
+cigo: run systemctl enable --now mysql

@@ -1,0 +1,4 @@
+CREATE USER IF NOT EXISTS 'mailreader'@'127.0.0.1' IDENTIFIED BY '{{ secrets.DB_PASSWORD }}';
+ALTER USER 'mailreader'@'127.0.0.1' IDENTIFIED BY '{{ secrets.DB_PASSWORD }}';
+GRANT SELECT ON mail.* TO 'mailreader'@'127.0.0.1';
+FLUSH PRIVILEGES;

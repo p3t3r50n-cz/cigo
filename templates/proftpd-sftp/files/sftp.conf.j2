@@ -1,0 +1,11 @@
+<IfModule mod_sftp.c>
+  # A VirtualHost is required to open an additional listening port; a bare Port
+  # directive in the global context does not create a second listener.
+  <VirtualHost 0.0.0.0>
+    Port {{ SFTP_PORT }}
+    SFTPEngine on
+    SFTPHostKey /etc/proftpd/keys/sftp_host_ed25519_key
+    DefaultRoot ~
+    RequireValidShell off
+  </VirtualHost>
+</IfModule>

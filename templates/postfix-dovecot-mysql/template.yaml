@@ -1,0 +1,62 @@
+#cloud-config
+# Mail-stack starter: Postfix, Dovecot IMAP/LMTP, and local MySQL virtual-mailbox
+# maps. Configuration and SQL are rendered on the host from files/ on every run,
+# so a changed --var MAIL_HOSTNAME or a new DB_PASSWORD secret is applied by a
+# re-deploy; run with:
+#   ./cigo.sh create --name mail-01 --template templates/postfix-dovecot-mysql \
+#     --secret-file DB_PASSWORD=/etc/cigo/secrets/db_password
+#
+# Secret material lives in secret/ (see secret/README.md); that directory is
+# git-ignored except for its README and *.example placeholders.
+cigo: image ubuntu:24.04
+cigo: profile default
+cigo: config limits.memory=2GiB
+cigo: config limits.cpu=2
+cigo: var MAIL_HOSTNAME=mail.example.test
+
+package_update: true
+package_upgrade: true
+
+debconf_selections:
+  postfix: |
+    postfix postfix/mailname string %MAIL_HOSTNAME%
+    postfix postfix/main_mailer_type select Internet Site
+
+users:
+  - default
+  - name: vmail
+    system: true
+    uid: 5000
+    home: /var/vmail
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+
+cigo: packages mysql-server postfix-mysql dovecot-imapd dovecot-lmtpd dovecot-mysql
+
+# Everything is rendered on the host; only the result is pushed into the
+# container. The SQL holding the password lives in /run and is removed below.
+cigo: render files/postfix-mysql-virtual-domains.cf.j2 /etc/postfix/mysql-virtual-domains.cf 0600
+cigo: render files/postfix-mysql-virtual-mailboxes.cf.j2 /etc/postfix/mysql-virtual-mailboxes.cf 0600
+cigo: render files/postfix-mysql-virtual-aliases.cf.j2 /etc/postfix/mysql-virtual-aliases.cf 0600
+cigo: render files/dovecot-sql.conf.ext.j2 /etc/dovecot/dovecot-sql.conf.ext 0600
+cigo: render files/99-cigo-mail.conf /etc/dovecot/conf.d/99-cigo-mail.conf 0644
+cigo: render files/mail-schema.sql /run/cigo-mail-schema.sql 0600
+cigo: render files/mail-reader.sql.j2 /run/cigo-mail-reader.sql 0600
+cigo: run mysql < /run/cigo-mail-schema.sql
+cigo: run mysql < /run/cigo-mail-reader.sql
+cigo: run rm -f /run/cigo-mail-schema.sql /run/cigo-mail-reader.sql
+cigo: run postconf -e 'myhostname = %MAIL_HOSTNAME%'
+cigo: run postconf -e 'mydestination = localhost'
+cigo: run postconf -e 'virtual_mailbox_domains = mysql:/etc/postfix/mysql-virtual-domains.cf'
+cigo: run postconf -e 'virtual_mailbox_maps = mysql:/etc/postfix/mysql-virtual-mailboxes.cf'
+cigo: run postconf -e 'virtual_alias_maps = mysql:/etc/postfix/mysql-virtual-aliases.cf'
+cigo: run postconf -e 'virtual_mailbox_base = /var/vmail'
+cigo: run postconf -e 'virtual_uid_maps = static:5000'
+cigo: run postconf -e 'virtual_gid_maps = static:5000'
+cigo: run postconf -e 'virtual_transport = lmtp:unix:private/dovecot-lmtp'
+cigo: run postconf -e 'smtpd_sasl_auth_enable = no'
+cigo: run sed -i -E 's|^!include auth-system\.conf\.ext|#!include auth-system.conf.ext|; s|^#!include auth-sql\.conf\.ext|!include auth-sql.conf.ext|' /etc/dovecot/conf.d/10-auth.conf
+cigo: run doveconf -n
+cigo: run postfix check
+cigo: run systemctl enable --now mysql dovecot postfix
+cigo: run systemctl reload-or-restart dovecot postfix

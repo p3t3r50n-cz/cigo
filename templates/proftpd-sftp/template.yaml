@@ -1,0 +1,29 @@
+#cloud-config
+# SFTP-only starter using ProFTPD's mod_sftp and local Linux accounts.
+# Configuration and the host key are rendered on the host from files/ on every
+# run, so a changed --var SFTP_PORT or a rotated key is applied by a re-deploy;
+# run with:
+#   ./cigo.sh create --name sftp-01 --template templates/proftpd-sftp \
+#     --secret-file SFTP_HOST_PRIVATE_KEY=/etc/cigo/secrets/sftp_host_ed25519_key
+#
+# Secret material lives in secret/ (see secret/README.md); that directory is
+# git-ignored except for its README and *.example placeholders.
+cigo: image ubuntu:24.04
+cigo: profile default
+cigo: config limits.memory=1GiB
+cigo: config limits.cpu=1
+cigo: var SFTP_PORT=2022
+
+package_update: true
+package_upgrade: true
+
+cigo: packages proftpd-core proftpd-mod-crypto
+
+cigo: render files/sftp-host-key.j2 /etc/proftpd/keys/sftp_host_ed25519_key 0600
+cigo: render files/sftp.conf.j2 /etc/proftpd/conf.d/sftp.conf 0644
+cigo: run sed -i -E 's/^[[:space:]]*#?[[:space:]]*LoadModule[[:space:]]+mod_sftp\.c[[:space:]]*$/LoadModule mod_sftp.c/' /etc/proftpd/modules.conf
+# SFTP only: disable the plain FTP listener shipped in the vendor config.
+cigo: run sed -i -E 's/^Port 21$/Port 0/' /etc/proftpd/proftpd.conf
+cigo: run proftpd -t
+cigo: run systemctl enable proftpd
+cigo: run systemctl restart proftpd

@@ -1,0 +1,8 @@
+#cloud-config
+# Fixture for `cigo: from` as a target: the source container supplies config and
+# devices, this template only adds a run step.
+cigo: profile default
+cigo: run true
+
+package_update: false
+package_upgrade: false

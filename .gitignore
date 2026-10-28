@@ -1,0 +1,13 @@
+# Operator secret material must never be committed.
+#
+# templates/*/secret/* keeps real key files out of Git while README.md and
+# *.example stay tracked as documentation.
+templates/*/secret/*
+!templates/*/secret/README.md
+!templates/*/secret/*.example
+
+# Rendered output and local dumps that may contain secrets.
+*.user-data
+
+# Web
+web

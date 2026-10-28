@@ -1,0 +1,39 @@
+#cloud-config
+# WireGuard server starter. LXD must permit the required network operations.
+#
+# Template layout: this file plus files/, copied into the container on every
+# run. Relative host paths resolve against this directory, so the template
+# works from any current directory:
+#   ./cigo.sh create --name vpn-01 --template templates/wireguard-server \
+#     --secret-file WG_PRIVATE_KEY=/etc/cigo/secrets/wg_private_key
+#
+# Secret material lives in secret/ (see secret/README.md); that directory is
+# git-ignored except for its README and *.example placeholders.
+cigo: image ubuntu:24.04
+cigo: profile default
+cigo: config limits.memory=1GiB
+cigo: config limits.cpu=1
+cigo: var WG_ADDRESS=10.66.66.1/24
+cigo: var WG_PORT=51820
+
+package_update: true
+package_upgrade: true
+
+cigo: packages wireguard
+
+# Pipeline: render on the host from files/ and restart the tunnel, so a changed
+# --var WG_PORT or a new key takes effect on re-deploy. A relative render source
+# resolves against this template directory.
+cigo: render files/wg0.conf.j2 /etc/wireguard/wg0.conf 0600
+cigo: run systemctl enable wg-quick@wg0
+cigo: run systemctl restart wg-quick@wg0
+
+# First-boot content still belongs in cloud-config. For example:
+#
+# write_files:
+#   - path: /etc/sysctl.d/70-wireguard.conf
+#     permissions: "0644"
+#     content: |
+#       net.ipv4.ip_forward=1
+#
+# Anything that must be refreshed by a re-deploy belongs in the pipeline above.

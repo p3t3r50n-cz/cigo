@@ -1,0 +1,13 @@
+<VirtualHost *:80>
+    ServerName {{ SITE_DOMAIN }}
+    DocumentRoot /srv/www/{{ SITE_DOMAIN }}/public
+
+    <Directory /srv/www/{{ SITE_DOMAIN }}/public>
+        Options -Indexes +FollowSymLinks
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/{{ SITE_DOMAIN }}-error.log
+    CustomLog ${APACHE_LOG_DIR}/{{ SITE_DOMAIN }}-access.log combined
+</VirtualHost>

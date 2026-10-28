@@ -1,0 +1,11 @@
+#cloud-config
+# Fixture for declared devices. DATA_DIR is supplied by the test so the host path
+# can point at a temporary directory.
+cigo: profile default
+cigo: config limits.memory=192MiB
+cigo: var DATA_DIR=/tmp
+cigo: device disk it-data source=%DATA_DIR% path=/mnt/it-data
+cigo: render files/device.conf.j2 /etc/cigo-it/device.conf 0644
+
+package_update: false
+package_upgrade: false

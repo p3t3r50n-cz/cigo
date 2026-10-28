@@ -1,0 +1,23 @@
+#cloud-config
+# Single-site HTTP reverse proxy. Configure TLS and upstream health separately.
+# The site file is rendered on the host from files/ on every run, so a changed
+# --var SITE_DOMAIN or UPSTREAM_URL is applied by a re-deploy; run with:
+# --template templates/nginx-proxy
+cigo: image ubuntu:24.04
+cigo: profile default
+cigo: config limits.memory=1GiB
+cigo: config limits.cpu=1
+cigo: var SITE_DOMAIN=example.test
+cigo: var UPSTREAM_URL=http://app-01.lxd:8080
+
+package_update: true
+package_upgrade: true
+
+cigo: packages nginx
+
+cigo: render files/site.conf.j2 /etc/nginx/sites-available/%SITE_DOMAIN% 0644
+cigo: run rm -f /etc/nginx/sites-enabled/default
+cigo: run ln -sfn /etc/nginx/sites-available/%SITE_DOMAIN% /etc/nginx/sites-enabled/%SITE_DOMAIN%
+cigo: run nginx -t
+cigo: run systemctl enable --now nginx
+cigo: run systemctl reload nginx

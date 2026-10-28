@@ -1,0 +1,13 @@
+#cloud-config
+# Starter LAMP stack for a small lab. Review firewall, TLS, and database access before production use.
+cigo: image ubuntu:24.04
+cigo: profile default
+cigo: config limits.memory=2GiB
+cigo: config limits.cpu=2
+
+package_update: true
+package_upgrade: true
+
+cigo: packages apache2 mysql-server libapache2-mod-php php-mysql
+cigo: run systemctl enable --now mysql
+cigo: run systemctl enable --now apache2
