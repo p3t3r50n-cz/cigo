@@ -65,6 +65,10 @@ template no longer declares it. Consequences:
   metadata is left alone.
 - Whole devices are never deleted implicitly. `--check` reports them and
   `--remove-device` deletes them on request.
+- `--device` uses the directive syntax and overrides a template device with the
+  same name, the same way `--config` overrides a key. Devices need no managed
+  list: reconciliation is scoped by device name, and a duplicate on one command
+  line is an error.
 - Metadata is written last, so a run that fails half-way does not claim
   management of a container it did not finish preparing.
 - `--from` filters `user.cigo.*` out of the inherited config.

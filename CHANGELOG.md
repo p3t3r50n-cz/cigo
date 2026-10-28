@@ -5,6 +5,17 @@ All notable changes to cigo are documented here. The format follows
 numbers follow [Semantic Versioning](https://semver.org/). While the major
 version is 0, a minor bump marks a breaking change.
 
+## [0.3.0] — 2026-10-28
+
+### Added
+
+- `--device 'TYPE NAME KEY=VALUE ...'` declares an LXD disk or proxy device on
+  the command line, with the same syntax as the `cigo: device` directive. It is
+  repeatable, works with every verb, and overrides a template device with the
+  same name, so one container can be pointed at a different host directory
+  without editing the template. The same name declared twice on one command
+  line is rejected.
+
 ## [0.2.1] — 2026-10-28
 
 ### Fixed

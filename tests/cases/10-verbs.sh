@@ -52,3 +52,11 @@ fi
 pass "adopt does not set created-at"
 assert_contains "$(lxc config get "$plain" user.cigo.adopted-at || true)" "T" \
     "adopt records adopted-at"
+
+# --device is accepted by create as well and shows up in the plan.
+probe=$(ct_name verbs-device)
+output=$(cigo_expect_ok "$CIGO" create --name "$probe" --template "$FIXTURES/basic" \
+    --device "disk probe source=/tmp path=/mnt/probe" --check)
+assert_contains "$output" "probe disk source=/tmp path=/mnt/probe" \
+    "--device shown in the create plan"
+assert_no_container "$probe"

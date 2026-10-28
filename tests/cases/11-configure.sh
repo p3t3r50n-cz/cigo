@@ -99,3 +99,28 @@ status=$?
 set -e
 assert_eq "1" "$status" "closed stdin cancels"
 assert_eq "3" "$(lxc config get "$name" limits.cpu)" "cancelled run changed nothing"
+
+# --device declares a device from the command line and overrides a template
+# device with the same name.
+cigo_expect_ok "$CIGO" configure --name "$name" \
+    --device "disk it-data source=$work/one path=/mnt/it-data" --yes >/dev/null
+assert_eq "$work/one" "$(lxc config device get "$name" it-data source)" \
+    "--device added a device"
+assert_eq "from-one" "$(ct_run "$name" "cat /mnt/it-data/marker.txt")" "--device is mounted"
+
+cigo_expect_ok "$CIGO" configure --name "$name" --template "$work/tpl" \
+    --var "DATA_DIR=$work/two" \
+    --device "disk it-data source=$work/one path=/mnt/it-data" --yes >/dev/null
+assert_eq "$work/one" "$(lxc config device get "$name" it-data source)" \
+    "--device overrides the template device"
+assert_eq "from-one" "$(ct_run "$name" "cat /mnt/it-data/marker.txt")" \
+    "--device override wins over the template source"
+
+output=$(cigo_expect_fail "$CIGO" configure --name "$name" \
+    --device "disk dup source=$work/one path=/mnt/dup" \
+    --device "disk dup source=$work/two path=/mnt/dup" --yes)
+assert_contains "$output" "more than once with --device" "duplicate --device rejected"
+
+output=$(cigo_expect_fail "$CIGO" configure --name "$name" \
+    --device "disk incomplete path=/mnt/incomplete readonly=true" --yes)
+assert_contains "$output" "requires source=HOST_PATH" "incomplete --device rejected"

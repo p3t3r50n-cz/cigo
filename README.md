@@ -111,7 +111,7 @@ $ lxc config show web-01 | grep user.cigo
   user.cigo.created-at: 2026-10-28T13:29:48Z
   user.cigo.managed-keys: limits.cpu,limits.memory
   user.cigo.template: lamp
-  user.cigo.version: 0.2.1
+  user.cigo.version: 0.3.0
 ```
 
 `user.cigo.managed-keys` lists the config keys cigo has written. It is what
@@ -242,6 +242,19 @@ the LXD host, not necessarily the machine running the client. Paths and option
 values containing spaces are not supported. Add LXD-supported options such as
 `readonly=true` to disk devices as needed.
 
+A device can also be declared on the command line, which is handy for a mount
+or a port that belongs to one container only:
+
+```bash
+./cigo.sh configure --name web-01 \
+  --device 'disk data2 source=/srv/data2 path=/mnt/data2 shift=true'
+```
+
+`--device` takes the same syntax as the directive. It applies to every verb and
+overrides a template device with the same name, so the same command can point
+one container at a different host directory. Declaring the same name twice on
+one command line is an error rather than a silent last-one-wins.
+
 On create, disk devices are added before the first start; proxy devices are
 added after cloud-init completes. On every `redeploy` and `configure`, cigo
 ensures each declared device exists and updates its options to match the
@@ -274,6 +287,9 @@ cigo.sh adopt     --name NAME --template FILE.yaml [options]
 --from CONTAINER         create only
 --profile PROFILE        create only; repeatable, replaces all template profiles
 --config KEY=VALUE       repeatable; merges by key and overrides the template
+--device 'TYPE NAME KEY=VALUE ...'
+                         repeatable; same syntax as the directive, overrides a
+                         template device with the same name
 --unset KEY              configure, redeploy; repeatable
 --remove-device NAME     configure, redeploy; repeatable
 --var NAME=VALUE         repeatable; overrides a variable already in the template

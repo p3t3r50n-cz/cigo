@@ -55,7 +55,7 @@ setup_colors
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TEMPLATE_DIR=""
-CIGO_VERSION="0.2.1"
+CIGO_VERSION="0.3.0"
 DEFAULT_IMAGE="ubuntu:24.04"
 DEFAULT_TIMEOUT=900
 
@@ -89,6 +89,7 @@ CLI_PROFILES=()
 CLI_CONFIG=()
 CLI_UNSET=()
 CLI_REMOVE_DEVICES=()
+CLI_DEVICES=()
 CLI_SECRET_FILES=()
 CLI_SECRET_ENV=()
 CLI_TIMEOUT=""
@@ -224,6 +225,9 @@ Options:
   --from CONTAINER          Inherit config and devices from a container (create only)
   --profile PROFILE         LXD profile; repeatable, replaces template profiles
   --config KEY=VALUE        Container config; repeatable
+  --device 'TYPE NAME KEY=VALUE ...'
+                            LXD device; repeatable, same syntax as the
+                            directive, overrides a template device by name
   --unset KEY               Remove a config key (configure, redeploy)
   --remove-device NAME      Remove a whole device (configure, redeploy)
   --var NAME=VALUE          Override a template variable; repeatable
@@ -242,8 +246,8 @@ Options:
 Command-line options override matching template directives.
 
 configure without --template is imperative: it applies exactly the given
---config/--unset/--remove-device values, never prunes, and does not touch
-cigo metadata. With --template it is declarative and also removes config keys
+--config/--device/--unset/--remove-device values, never prunes, and does not
+touch cigo metadata. With --template it is declarative and also removes config keys
 that cigo wrote earlier but the template no longer declares.
 
 The template is cloud-config. cigo: directives must start at column one and
@@ -817,6 +821,43 @@ parse_device_directive() {    local value=$1 type name token key source path
     DEVICE_ARGS["$name"]="${args[*]}"
 }
 
+drop_device_declaration() {
+    local name=$1 device
+    local -a kept=()
+
+    for device in "${DEVICE_NAMES[@]}"; do
+        [[ $device == "$name" ]] || kept+=("$device")
+    done
+    DEVICE_NAMES=("${kept[@]}")
+    unset "DEVICE_TYPES[$name]" "DEVICE_ARGS[$name]"
+    return 0
+}
+
+# --device uses the directive syntax and overrides a template device with the
+# same name, mirroring how --config overrides a config key. Duplicates on the
+# command line are an error rather than a silent last-one-wins.
+apply_cli_devices() {
+    local item candidate
+    local -a words=()
+    local -A seen=()
+
+    ((${#CLI_DEVICES[@]})) || return 0
+    for item in "${CLI_DEVICES[@]}"; do
+        words=()
+        read -r -a words <<< "$item"
+        candidate=""
+        ((${#words[@]} >= 2)) && candidate=${words[1]}
+        if [[ -n $candidate ]]; then
+            [[ ! ${seen[$candidate]+present} ]] ||
+                fail "Device $candidate is declared more than once with --device."
+            seen["$candidate"]=1
+            drop_device_declaration "$candidate"
+        fi
+        parse_device_directive "$item"
+    done
+    return 0
+}
+
 # A short, human-readable name for the template, stored on the container so a
 # later redeploy/check can tell which template a container came from.
 template_label() {
@@ -872,6 +913,7 @@ load_template() {
     done
     substituted=$(substitute_vars "$raw")
     parse_directives "$substituted"
+    apply_cli_devices
     TEMPLATE_CONFIG=("${CT_CONFIG[@]}")
     apply_cli_pipeline_overrides
 
@@ -2206,8 +2248,10 @@ run_verb() {
         load_template
     else
         CT_CONFIG=("${CLI_CONFIG[@]}")
-        if ((${#CT_CONFIG[@]} == 0 && ${#CLI_UNSET[@]} == 0 && ${#CLI_REMOVE_DEVICES[@]} == 0)); then
-            fail "Nothing to configure: pass --config, --unset, --remove-device, or --template."
+        apply_cli_devices
+        if ((${#CT_CONFIG[@]} == 0 && ${#CLI_UNSET[@]} == 0 && ${#CLI_REMOVE_DEVICES[@]} == 0 &&
+            ${#DEVICE_NAMES[@]} == 0)); then
+            fail "Nothing to configure: pass --config, --device, --unset, --remove-device, or --template."
         fi
     fi
 
@@ -2344,6 +2388,10 @@ parse_options() {
             --remove-device)
                 (($# >= 2)) || fail "Missing value after --remove-device."
                 CLI_REMOVE_DEVICES+=("$2"); shift 2 ;;
+            --device)
+                (($# >= 2)) || fail "Missing value after --device."
+                [[ -n $2 ]] || fail "--device requires a declaration."
+                CLI_DEVICES+=("$2"); shift 2 ;;
             --timeout)
                 (($# >= 2)) || fail "Missing value after --timeout."
                 [[ $2 =~ ^[0-9]+$ ]] || fail "--timeout expects a number of seconds: $2"
