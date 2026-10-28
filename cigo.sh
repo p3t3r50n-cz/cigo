@@ -53,9 +53,24 @@ setup_colors() {
 
 setup_colors
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# Follow symlinks so an installed copy in PATH still finds the templates that
+# live next to the real script, which is what `ln -s .../cigo.sh /usr/local/bin`
+# sets up.
+resolve_script_dir() {
+    local source=${BASH_SOURCE[0]} dir target
+
+    while [[ -L $source ]]; do
+        dir=$(cd -P -- "$(dirname -- "$source")" && pwd)
+        target=$(readlink -- "$source") || break
+        [[ $target == /* ]] || target=$dir/$target
+        source=$target
+    done
+    cd -P -- "$(dirname -- "$source")" && pwd
+}
+
+SCRIPT_DIR=$(resolve_script_dir)
 TEMPLATE_DIR=""
-CIGO_VERSION="0.3.0"
+CIGO_VERSION="0.3.1"
 DEFAULT_IMAGE="ubuntu:24.04"
 DEFAULT_TIMEOUT=900
 

@@ -81,8 +81,11 @@ rejected rather than overridden.
 
 ## Template layout
 
-`--template` accepts a file or a directory containing `template.yaml`. A
-directory may hold its own source files:
+`--template` accepts a file or a directory containing `template.yaml` and is
+looked up as given, then next to the script, then in `<script dir>/templates`.
+The script directory is taken after resolving symlinks, so installing cigo into
+`PATH` with `ln -s` keeps the bundled templates reachable. A directory may hold
+its own source files:
 
 ```text
 templates/wireguard-server/

@@ -5,6 +5,16 @@ All notable changes to cigo are documented here. The format follows
 numbers follow [Semantic Versioning](https://semver.org/). While the major
 version is 0, a minor bump marks a breaking change.
 
+## [0.3.1] — 2026-10-28
+
+### Fixed
+
+- Installing cigo on `PATH` as a symlink now works. The script resolves the
+  link before looking for templates, so `cigo.sh create --template lamp` finds
+  the bundled templates (and their relative render sources) from any working
+  directory. A plain copy still has no templates beside it and needs an
+  explicit path, which is now documented.
+
 ## [0.3.0] — 2026-10-28
 
 ### Added

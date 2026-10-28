@@ -111,7 +111,7 @@ $ lxc config show web-01 | grep user.cigo
   user.cigo.created-at: 2026-10-28T13:29:48Z
   user.cigo.managed-keys: limits.cpu,limits.memory
   user.cigo.template: lamp
-  user.cigo.version: 0.3.0
+  user.cigo.version: 0.3.1
 ```
 
 `user.cigo.managed-keys` lists the config keys cigo has written. It is what
@@ -660,6 +660,7 @@ when a case fails, so existing containers are never touched. The suite covers:
 | `10-verbs` | `create`/`redeploy`/`configure` refuse the wrong target; `adopt` stamps metadata; create-only options are rejected |
 | `11-configure` | `configure` skips actions, prunes only keys cigo wrote, keeps manual keys, and removes devices only on request |
 | `12-drift` | `--check` exits 1 on drift and 0 when clean; `--dry-run` prints the same plan and changes nothing |
+| `13-install` | a symlinked script finds bundled templates from any directory; a copy needs an explicit path |
 
 Cases marked in the table only exercise the fast path (fixtures that install no
 packages), so the whole suite finishes in about four minutes. Deploying the real
