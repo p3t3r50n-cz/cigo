@@ -5,6 +5,14 @@ All notable changes to cigo are documented here. The format follows
 numbers follow [Semantic Versioning](https://semver.org/). While the major
 version is 0, a minor bump marks a breaking change.
 
+## [0.2.1] — 2026-10-28
+
+### Fixed
+
+- Confirmation prompts displayed `[Y/n]` but an empty answer cancelled. Enter
+  now accepts the displayed default; a closed stdin still cancels, so
+  `cigo.sh ... < /dev/null` never proceeds by accident.
+
 ## [0.2.0] — 2026-10-28
 
 ### Breaking changes

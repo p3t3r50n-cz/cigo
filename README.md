@@ -72,7 +72,8 @@ To take over a container that already exists:
 ./cigo.sh adopt --name old-web --template templates/lamp
 ```
 
-`--yes` skips confirmations. Proxy devices inherited from a source container
+Confirmations show their default (`[Y/n]`), so pressing Enter accepts. `--yes`
+skips them entirely, which is what scripts should use. Proxy devices inherited from a source container
 are always skipped in this mode because they can conflict with the source.
 
 ## Bootstrap and pipeline
@@ -110,7 +111,7 @@ $ lxc config show web-01 | grep user.cigo
   user.cigo.created-at: 2026-10-28T13:29:48Z
   user.cigo.managed-keys: limits.cpu,limits.memory
   user.cigo.template: lamp
-  user.cigo.version: 0.2.0
+  user.cigo.version: 0.2.1
 ```
 
 `user.cigo.managed-keys` lists the config keys cigo has written. It is what

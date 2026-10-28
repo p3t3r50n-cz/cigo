@@ -202,9 +202,11 @@ checked as soon as a template declares a render action.
 - `--dry-run` and `--check` share the planning code with the applying code, so
   the printed plan cannot drift from what a real run does.
 - `--dump-user-data` writes the exact transformed user-data with mode `0600`.
-- Confirmation defaults to no. `--yes` is explicit consent to changes;
-  inherited proxy handoffs are still skipped, while explicitly declared
-  proxy devices are applied.
+- Confirmation honours the displayed default: the prompt shows `[Y/n]`, so an
+  empty answer means yes. A closed stdin is never treated as consent and
+  cancels instead, which keeps `cigo.sh ... < /dev/null` safe. `--yes` is
+  explicit consent for automation; inherited proxy handoffs are still skipped,
+  while explicitly declared proxy devices are applied.
 - Temporary host files and staging directories are unique per invocation.
 - Cleanup failures that could leave temporary render data are reported.
 

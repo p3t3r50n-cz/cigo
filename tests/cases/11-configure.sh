@@ -86,3 +86,16 @@ assert_not_contains "$output" "Removed device" "configure keeps undeclared devic
 assert_contains "$(lxc config device show "$name")" "it-data:" "device still present"
 cigo_expect_ok "$CIGO" configure --name "$name" --remove-device it-data --yes >/dev/null
 assert_not_contains "$(lxc config device show "$name")" "it-data:" "device removed on request"
+
+# The prompt shows [Y/n], so an empty answer must accept; a closed stdin must
+# cancel instead of being read as consent.
+printf '\n' | "$CIGO" configure --name "$name" --config limits.cpu=3 >/dev/null 2>&1 ||
+    fail "empty answer should accept the displayed default"
+assert_eq "3" "$(lxc config get "$name" limits.cpu)" "empty answer applied the change"
+
+set +e
+"$CIGO" configure --name "$name" --config limits.cpu=5 < /dev/null >/dev/null 2>&1
+status=$?
+set -e
+assert_eq "1" "$status" "closed stdin cancels"
+assert_eq "3" "$(lxc config get "$name" limits.cpu)" "cancelled run changed nothing"

@@ -55,7 +55,7 @@ setup_colors
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TEMPLATE_DIR=""
-CIGO_VERSION="0.2.0"
+CIGO_VERSION="0.2.1"
 DEFAULT_IMAGE="ubuntu:24.04"
 DEFAULT_TIMEOUT=900
 
@@ -167,6 +167,9 @@ ct_exec_at() {
     lxc exec "$ct" -- "$@" < /dev/null
 }
 
+# Confirmation prompt. The bracketed value is the default, so an empty answer
+# takes it: Enter means yes. A closed stdin (no interactive input at all) can
+# never be mistaken for consent and always cancels. Use --yes for automation.
 confirm() {
     local answer
 
@@ -187,7 +190,7 @@ confirm() {
         printf '\n' >&2
         return 1
     fi
-    answer=${answer:-n}
+    answer=${answer:-y}
     case $answer in
         y|Y|yes|YES) return 0 ;;
         *) return 1 ;;
