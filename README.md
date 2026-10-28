@@ -1,12 +1,31 @@
-# cigo — a minimal cloud-init wrapper for LXD
+<p align="center">
+  <img src="assets/logo/logo.svg" width="132" alt="cigo">
+</p>
 
-The name combines **CI** (continuous integration) and **GO**. The idea is
-simple: run cigo, then get on with your work.
+<h1 align="center">Run <em>CI</em> and <em>Go</em>.</h1>
 
-cigo is a small Bash wrapper around `cloud-init` and `lxc`. It is intended for
-small labs and infrastructures with a handful to a few dozen single-purpose
-containers. It does not replace Ansible or Terraform and deliberately has no
-loops, conditions, roles, or inventory.
+<p align="center">
+  A minimal cloud-init wrapper for LXD.<br>
+  Your template stays cloud-config; the deploy becomes repeatable.
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#command-line-options">Options</a> ·
+  <a href="#template-format">Templates</a> ·
+  <a href="#container-metadata-and-managed-keys">Managed keys</a> ·
+  <a href="#testing">Testing</a> ·
+  <a href="#license">License</a>
+</p>
+
+---
+
+cigo is a small Bash wrapper around `cloud-init` and `lxc`. The name combines
+**CI** (continuous integration; here it doubles as `cloud-init`) and **GO**: run
+cigo, then get on with your work. It is intended for small labs and
+infrastructures with a handful to a few dozen single-purpose containers. It
+**does not** replace Ansible or Terraform and deliberately has no loops,
+conditions, roles, or inventory.
 
 The template remains a normal cloud-config file. cigo adds only what is
 missing for this use case: container settings before first boot, ordered
